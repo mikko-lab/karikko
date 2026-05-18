@@ -1,20 +1,32 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, ActivityIndicator } from 'react-native';
+import { Colors } from './src/constants/colors';
+import { isOnboardingDone } from './src/storage/settings';
+import OnboardingScreen from './src/screens/OnboardingScreen';
+import MapScreen from './src/screens/MapScreen';
 
 export default function App() {
-  return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
-  );
-}
+  const [ready, setReady] = useState(false);
+  const [onboardingDone, setOnboardingDone] = useState(false);
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+  useEffect(() => {
+    isOnboardingDone().then((done) => {
+      setOnboardingDone(done);
+      setReady(true);
+    });
+  }, []);
+
+  if (!ready) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.primary }}>
+        <ActivityIndicator color={Colors.white} size="large" />
+      </View>
+    );
+  }
+
+  if (!onboardingDone) {
+    return <OnboardingScreen onDone={() => setOnboardingDone(true)} />;
+  }
+
+  return <MapScreen />;
+}

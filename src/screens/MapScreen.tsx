@@ -1,0 +1,303 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  Modal,
+  TextInput,
+  Platform,
+} from 'react-native';
+import {
+  Map,
+  Camera,
+  UserLocation,
+  Marker,
+  type CameraRef,
+} from '@maplibre/maplibre-react-native';
+import * as Location from 'expo-location';
+import { Colors } from '../constants/colors';
+import { getVesselDraft } from '../storage/settings';
+import { insertHazard, getNearbyHazards, Hazard } from '../storage/db';
+
+const MAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+
+export default function MapScreen() {
+  const [location, setLocation] = useState<Location.LocationObject | null>(null);
+  const [draftCm, setDraftCm] = useState<number>(80);
+  const [hazards, setHazards] = useState<Hazard[]>([]);
+  const [reportModalVisible, setReportModalVisible] = useState(false);
+  const [reportNote, setReportNote] = useState('');
+  const [reportDepth, setReportDepth] = useState('');
+  const cameraRef = useRef<CameraRef>(null);
+  const hasFollowed = useRef(false);
+
+  useEffect(() => {
+    let sub: Location.LocationSubscription | null = null;
+
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Sijaintilupa puuttuu', 'KARIKKO tarvitsee sijainnin toimiakseen.');
+        return;
+      }
+      const draft = await getVesselDraft();
+      if (draft) setDraftCm(draft);
+
+      sub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 5 },
+        async (loc) => {
+          setLocation(loc);
+          if (!hasFollowed.current) {
+            hasFollowed.current = true;
+            cameraRef.current?.flyTo({
+              center: [loc.coords.longitude, loc.coords.latitude],
+              zoom: 13,
+              duration: 800,
+            });
+          }
+          const nearby = await getNearbyHazards(loc.coords.latitude, loc.coords.longitude);
+          setHazards(nearby);
+        }
+      );
+    })();
+
+    return () => { sub?.remove(); };
+  }, []);
+
+  async function handleReportHazard() {
+    if (!location) {
+      Alert.alert('Sijainti ei saatavilla', 'Odota että GPS löytyy.');
+      return;
+    }
+    setReportModalVisible(true);
+  }
+
+  async function submitReport() {
+    if (!location) return;
+    const depth = reportDepth ? parseInt(reportDepth, 10) : undefined;
+    await insertHazard({
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+      depth_cm: depth,
+      note: reportNote || undefined,
+    });
+    setReportModalVisible(false);
+    setReportNote('');
+    setReportDepth('');
+    Alert.alert('Kiitos!', 'Matalikkomerkintä tallennettu.');
+    const nearby = await getNearbyHazards(location.coords.latitude, location.coords.longitude);
+    setHazards(nearby);
+  }
+
+  return (
+    <View style={styles.container}>
+      <Map style={styles.map} mapStyle={MAP_STYLE}>
+        <Camera ref={cameraRef} />
+        <UserLocation />
+        {hazards.map((h) => (
+          <Marker
+            key={String(h.id)}
+            id={String(h.id)}
+            lngLat={[h.longitude, h.latitude]}
+          >
+            <View style={styles.hazardMarker}>
+              <Text style={styles.hazardMarkerText}>⚠</Text>
+            </View>
+          </Marker>
+        ))}
+      </Map>
+
+      <View style={styles.topBar}>
+        <Text style={styles.appName}>KARIKKO</Text>
+        <Text style={styles.draftInfo}>Syväys: {draftCm} cm</Text>
+      </View>
+
+      <View style={styles.bottomBar}>
+        {location && (
+          <Text style={styles.coordText}>
+            {location.coords.latitude.toFixed(5)}°N{' '}
+            {location.coords.longitude.toFixed(5)}°E
+          </Text>
+        )}
+        <TouchableOpacity style={styles.reportButton} onPress={handleReportHazard}>
+          <Text style={styles.reportButtonText}>⚠ Merkitse matalikko</Text>
+        </TouchableOpacity>
+      </View>
+
+      <Modal visible={reportModalVisible} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Merkitse matalikko</Text>
+            <Text style={styles.modalSubtitle}>
+              Sijainti tallennetaan nykyiseen GPS-pisteeseesi.
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Syvyys senttimetreissä (valinnainen)"
+              placeholderTextColor={Colors.textMuted}
+              keyboardType="number-pad"
+              value={reportDepth}
+              onChangeText={setReportDepth}
+            />
+            <TextInput
+              style={[styles.modalInput, styles.modalInputMultiline]}
+              placeholder="Lisätietoja (valinnainen)"
+              placeholderTextColor={Colors.textMuted}
+              multiline
+              value={reportNote}
+              onChangeText={setReportNote}
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnCancel]}
+                onPress={() => setReportModalVisible(false)}
+              >
+                <Text style={styles.modalBtnCancelText}>Peruuta</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnSubmit]}
+                onPress={submitReport}
+              >
+                <Text style={styles.modalBtnSubmitText}>Tallenna</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1 },
+  map: { flex: 1 },
+  topBar: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 56 : 40,
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: 'rgba(10,61,107,0.9)',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  appName: {
+    color: Colors.white,
+    fontWeight: '800',
+    fontSize: 16,
+    letterSpacing: 2,
+  },
+  draftInfo: {
+    color: Colors.accent,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  bottomBar: {
+    position: 'absolute',
+    bottom: Platform.OS === 'ios' ? 40 : 24,
+    left: 16,
+    right: 16,
+    alignItems: 'center',
+    gap: 8,
+  },
+  coordText: {
+    color: Colors.white,
+    fontSize: 11,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  reportButton: {
+    backgroundColor: Colors.danger,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    width: '100%',
+    alignItems: 'center',
+  },
+  reportButtonText: {
+    color: Colors.white,
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  hazardMarker: {
+    backgroundColor: Colors.danger,
+    borderRadius: 16,
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: Colors.white,
+  },
+  hazardMarkerText: {
+    fontSize: 16,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: Colors.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 24,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: Colors.text,
+    marginBottom: 4,
+  },
+  modalSubtitle: {
+    fontSize: 13,
+    color: Colors.textMuted,
+    marginBottom: 16,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 10,
+    padding: 12,
+    fontSize: 15,
+    color: Colors.text,
+    marginBottom: 12,
+  },
+  modalInputMultiline: {
+    height: 80,
+    textAlignVertical: 'top',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 4,
+  },
+  modalBtn: {
+    flex: 1,
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  modalBtnCancel: {
+    backgroundColor: Colors.border,
+  },
+  modalBtnCancelText: {
+    color: Colors.text,
+    fontWeight: '600',
+  },
+  modalBtnSubmit: {
+    backgroundColor: Colors.danger,
+  },
+  modalBtnSubmitText: {
+    color: Colors.white,
+    fontWeight: '700',
+  },
+});
