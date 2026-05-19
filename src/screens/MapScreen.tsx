@@ -21,9 +21,34 @@ import { Colors } from '../constants/colors';
 import { getVesselDraft } from '../storage/settings';
 import { insertHazard, getNearbyHazards, Hazard } from '../storage/db';
 
-const MAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
+
+function toFinnishStyle(style: any): any {
+  if (!style?.layers) return style;
+  return {
+    ...style,
+    layers: style.layers.map((layer: any) => {
+      if (layer.type !== 'symbol' || !layer.layout?.['text-field']) return layer;
+      return {
+        ...layer,
+        layout: {
+          ...layer.layout,
+          'text-field': ['coalesce', ['get', 'name:fi'], ['get', 'name']],
+        },
+      };
+    }),
+  };
+}
 
 export default function MapScreen() {
+  const [mapStyle, setMapStyle] = useState<any>(null);
+
+  useEffect(() => {
+    fetch(MAP_STYLE_URL)
+      .then((r) => r.json())
+      .then((style) => setMapStyle(toFinnishStyle(style)))
+      .catch(() => setMapStyle(MAP_STYLE_URL));
+  }, []);
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [draftCm, setDraftCm] = useState<number>(80);
   const [hazards, setHazards] = useState<Hazard[]>([]);
@@ -32,6 +57,7 @@ export default function MapScreen() {
   const [reportDepth, setReportDepth] = useState('');
   const cameraRef = useRef<CameraRef>(null);
   const hasFollowed = useRef(false);
+  const FINLAND_DEFAULT = { center: [25.0, 60.2] as [number, number], zoom: 7 };
 
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
@@ -91,10 +117,19 @@ export default function MapScreen() {
     setHazards(nearby);
   }
 
+  if (!mapStyle) return (
+    <View style={[styles.container, { alignItems: 'center', justifyContent: 'center', backgroundColor: Colors.primary }]}>
+      <Text style={{ color: Colors.white }}>Ladataan karttaa…</Text>
+    </View>
+  );
+
   return (
     <View style={styles.container}>
-      <Map style={styles.map} mapStyle={MAP_STYLE}>
-        <Camera ref={cameraRef} />
+      <Map style={styles.map} mapStyle={mapStyle}>
+        <Camera
+          ref={cameraRef}
+          defaultSettings={{ centerCoordinate: FINLAND_DEFAULT.center, zoomLevel: FINLAND_DEFAULT.zoom }}
+        />
         <UserLocation />
         {hazards.map((h) => (
           <Marker
