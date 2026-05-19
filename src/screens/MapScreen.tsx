@@ -173,17 +173,14 @@ export default function MapScreen() {
         />
         <UserLocation />
         {fairwayLines && (
-          <GeoJSONSource id="fairways" existing={false} data={fairwayLines}>
+          <GeoJSONSource id="fairways" data={fairwayLines}>
             <Layer
               id="fairway-lines"
-              existing={false}
-              style={{
-                type: 'line',
-                paint: {
-                  'line-color': '#000000',
-                  'line-width': 2,
-                  'line-dasharray': [4, 3],
-                },
+              type="line"
+              paint={{
+                'line-color': '#000000',
+                'line-width': 2,
+                'line-dasharray': [4, 3],
               }}
             />
           </GeoJSONSource>
