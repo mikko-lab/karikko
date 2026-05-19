@@ -62,6 +62,7 @@ export default function MapScreen() {
   const [reportDepth, setReportDepth] = useState('');
   const [waterStation, setWaterStation] = useState<WaterStation | null>(null);
   const [fairwayLines, setFairwayLines] = useState<any>(null);
+  const [hazardsLoading, setHazardsLoading] = useState(false);
   const cameraRef = useRef<CameraRef>(null);
   const hasFollowed = useRef(false);
   const FINLAND_DEFAULT = { center: [25.0, 60.2] as [number, number], zoom: 7 };
@@ -90,8 +91,7 @@ export default function MapScreen() {
               duration: 800,
             });
           }
-          const nearby = await getNearbyHazards(loc.coords.latitude, loc.coords.longitude);
-          setHazards(nearby);
+          fetchHazards(loc.coords.latitude, loc.coords.longitude);
           fetchWaterLevel(loc.coords.latitude, loc.coords.longitude);
           fetchFairways(loc.coords.latitude, loc.coords.longitude);
         }
@@ -100,6 +100,24 @@ export default function MapScreen() {
 
     return () => { sub?.remove(); };
   }, []);
+
+  async function fetchHazards(lat: number, lon: number) {
+    setHazardsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/hazards?lat=${lat}&lon=${lon}`);
+      if (res.ok) {
+        const data = await res.json();
+        setHazards(data);
+        return;
+      }
+    } catch {
+      // offline — fallback paikalliseen SQLiteen
+    } finally {
+      setHazardsLoading(false);
+    }
+    const local = await getNearbyHazards(lat, lon);
+    setHazards(local);
+  }
 
   async function fetchFairways(lat: number, lon: number) {
     try {
@@ -144,18 +162,28 @@ export default function MapScreen() {
   async function submitReport() {
     if (!location) return;
     const depth = reportDepth ? parseInt(reportDepth, 10) : undefined;
-    await insertHazard({
+    const body = {
       latitude: location.coords.latitude,
       longitude: location.coords.longitude,
-      depth_cm: depth,
-      note: reportNote || undefined,
-    });
+      depth_cm: depth ?? null,
+      note: reportNote || null,
+    };
     setReportModalVisible(false);
     setReportNote('');
     setReportDepth('');
+
+    // Tallennetaan paikallisesti heti (offline-tuki)
+    await insertHazard({ latitude: body.latitude, longitude: body.longitude, depth_cm: depth, note: body.note ?? undefined });
+
+    // Lähetetään backendiin taustalla
+    fetch(`${API_BASE}/api/hazards`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch(() => {/* offline — paikallinen kopio riittää */});
+
     Alert.alert('Kiitos!', 'Matalikkomerkintä tallennettu.');
-    const nearby = await getNearbyHazards(location.coords.latitude, location.coords.longitude);
-    setHazards(nearby);
+    fetchHazards(location.coords.latitude, location.coords.longitude);
   }
 
   if (!mapStyle) return (
@@ -200,7 +228,9 @@ export default function MapScreen() {
 
       <View style={styles.topBar}>
         <Text style={styles.appName}>KARIKKO</Text>
-        <Text style={styles.draftInfo}>Syväys: {draftCm} cm</Text>
+        <Text style={styles.draftInfo}>
+          {hazardsLoading ? 'Ladataan…' : `Syväys: ${draftCm} cm`}
+        </Text>
       </View>
 
       <View style={styles.bottomBar}>
