@@ -3,7 +3,7 @@ export const Colors = {
   accent: '#F4A020',
   danger: '#D32F2F',
   warning: '#F57C00',
-  safe: '#388E3C',
+  safe: '#1565C0',
   background: '#F5F7FA',
   white: '#FFFFFF',
   text: '#1A1A2E',

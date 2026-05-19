@@ -14,12 +14,17 @@ import {
   Camera,
   UserLocation,
   Marker,
+  GeoJSONSource,
+  Layer,
   type CameraRef,
 } from '@maplibre/maplibre-react-native';
 import * as Location from 'expo-location';
 import { Colors } from '../constants/colors';
 import { getVesselDraft } from '../storage/settings';
 import { insertHazard, getNearbyHazards, Hazard } from '../storage/db';
+import WaterLevelBar, { WaterStation } from '../components/WaterLevelBar';
+
+const API_BASE = 'https://karikko-api.vercel.app';
 
 const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 
@@ -55,6 +60,8 @@ export default function MapScreen() {
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [reportNote, setReportNote] = useState('');
   const [reportDepth, setReportDepth] = useState('');
+  const [waterStation, setWaterStation] = useState<WaterStation | null>(null);
+  const [fairwayLines, setFairwayLines] = useState<any>(null);
   const cameraRef = useRef<CameraRef>(null);
   const hasFollowed = useRef(false);
   const FINLAND_DEFAULT = { center: [25.0, 60.2] as [number, number], zoom: 7 };
@@ -85,12 +92,46 @@ export default function MapScreen() {
           }
           const nearby = await getNearbyHazards(loc.coords.latitude, loc.coords.longitude);
           setHazards(nearby);
+          fetchWaterLevel(loc.coords.latitude, loc.coords.longitude);
+          fetchFairways(loc.coords.latitude, loc.coords.longitude);
         }
       );
     })();
 
     return () => { sub?.remove(); };
   }, []);
+
+  async function fetchFairways(lat: number, lon: number) {
+    try {
+      const res = await fetch(`${API_BASE}/api/fairways?lat=${lat}&lon=${lon}&radius=0.05`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const lines = data.lines ?? [];
+      if (lines.length === 0) return;
+      setFairwayLines({
+        type: 'FeatureCollection',
+        features: lines.map((l: any) => ({
+          type: 'Feature',
+          geometry: l.geometry,
+          properties: { name: l.name, depth: l.designDepthM },
+        })),
+      });
+    } catch {
+      // offline — säilytetään vanha data
+    }
+  }
+
+  async function fetchWaterLevel(lat: number, lon: number) {
+    try {
+      const res = await fetch(`${API_BASE}/api/water-level?lat=${lat}&lon=${lon}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const first = data.stations?.[0];
+      if (first) setWaterStation(first);
+    } catch {
+      // offline tai verkkovirhe — näytetään vanha arvo jos on
+    }
+  }
 
   async function handleReportHazard() {
     if (!location) {
@@ -131,6 +172,22 @@ export default function MapScreen() {
           defaultSettings={{ centerCoordinate: FINLAND_DEFAULT.center, zoomLevel: FINLAND_DEFAULT.zoom }}
         />
         <UserLocation />
+        {fairwayLines && (
+          <GeoJSONSource id="fairways" existing={false} data={fairwayLines}>
+            <Layer
+              id="fairway-lines"
+              existing={false}
+              style={{
+                type: 'line',
+                paint: {
+                  'line-color': '#000000',
+                  'line-width': 2,
+                  'line-dasharray': [4, 3],
+                },
+              }}
+            />
+          </GeoJSONSource>
+        )}
         {hazards.map((h) => (
           <Marker
             key={String(h.id)}
@@ -150,6 +207,7 @@ export default function MapScreen() {
       </View>
 
       <View style={styles.bottomBar}>
+        {waterStation && <WaterLevelBar station={waterStation} />}
         {location && (
           <Text style={styles.coordText}>
             {location.coords.latitude.toFixed(5)}°N{' '}
