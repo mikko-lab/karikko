@@ -41,7 +41,7 @@ export default function WaterLevelBar({ station }: Props) {
           {status.icon}
         </Text>
         <Text style={styles.level}>
-          <Text style={[styles.levelValue, { color: status.color }]}>{station.levelCm} cm</Text>
+          <Text style={styles.levelValue}>{station.levelCm} cm</Text>
           {'  '}
           <Text style={styles.statusLabel}>{status.label}</Text>
         </Text>
@@ -79,6 +79,7 @@ const styles = StyleSheet.create({
   levelValue: {
     fontSize: 16,
     fontWeight: '700',
+    color: Colors.white,
   },
   statusLabel: {
     fontSize: 12,

@@ -8,11 +8,11 @@ import {
   Modal,
   TextInput,
   Platform,
+  Linking,
 } from 'react-native';
 import {
   Map,
   Camera,
-  UserLocation,
   Marker,
   GeoJSONSource,
   Layer,
@@ -25,6 +25,21 @@ import { insertHazard, getNearbyHazards, Hazard } from '../storage/db';
 import WaterLevelBar, { WaterStation } from '../components/WaterLevelBar';
 
 const API_BASE = 'https://karikko-api.vercel.app';
+
+type HazardThreat = 'danger' | 'caution' | 'safe';
+
+function getHazardThreat(depthCm: number | null | undefined, draftCm: number): HazardThreat {
+  if (depthCm == null) return 'caution'; // tuntematon syvyys → tarkkaile
+  if (depthCm <= draftCm) return 'danger';
+  if (depthCm <= draftCm + 50) return 'caution';
+  return 'safe';
+}
+
+const THREAT_STYLE: Record<HazardThreat, { bg: string; icon: string; label: string }> = {
+  danger:  { bg: Colors.danger,  icon: '⚠', label: 'Vaarallinen' },
+  caution: { bg: Colors.warning, icon: '⚠', label: 'Tarkkaile' },
+  safe:    { bg: '#4A4A4A',      icon: '⚠', label: 'Ei uhkaa' },
+};
 
 const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 
@@ -62,6 +77,7 @@ export default function MapScreen() {
   const [reportDepth, setReportDepth] = useState('');
   const [waterStation, setWaterStation] = useState<WaterStation | null>(null);
   const [fairwayLines, setFairwayLines] = useState<any>(null);
+  const [shallowAreas, setShallowAreas] = useState<any>(null);
   const [hazardsLoading, setHazardsLoading] = useState(false);
   const cameraRef = useRef<CameraRef>(null);
   const hasFollowed = useRef(false);
@@ -125,15 +141,27 @@ export default function MapScreen() {
       if (!res.ok) return;
       const data = await res.json();
       const lines = data.lines ?? [];
-      if (lines.length === 0) return;
-      setFairwayLines({
-        type: 'FeatureCollection',
-        features: lines.map((l: any) => ({
+      if (lines.length > 0) {
+        setFairwayLines({
+          type: 'FeatureCollection',
+          features: lines.map((l: any) => ({
+            type: 'Feature',
+            geometry: l.geometry,
+            properties: { name: l.name, depth: l.designDepthM },
+          })),
+        });
+      }
+
+      const shallowFeatures = (data.fairways ?? [])
+        .filter((f: any) => f.designDepthM !== null && f.designDepthM <= 1.5)
+        .map((f: any) => ({
           type: 'Feature',
-          geometry: l.geometry,
-          properties: { name: l.name, depth: l.designDepthM },
-        })),
-      });
+          geometry: f.geometry,
+          properties: { depth: f.designDepthM, name: f.name },
+        }));
+      if (shallowFeatures.length > 0) {
+        setShallowAreas({ type: 'FeatureCollection', features: shallowFeatures });
+      }
     } catch {
       // offline — säilytetään vanha data
     }
@@ -145,7 +173,7 @@ export default function MapScreen() {
       if (!res.ok) return;
       const data = await res.json();
       const first = data.stations?.[0];
-      if (first) setWaterStation(first);
+      if (first && first.distKm <= 25) setWaterStation(first);
     } catch {
       // offline tai verkkovirhe — näytetään vanha arvo jos on
     }
@@ -197,9 +225,52 @@ export default function MapScreen() {
       <Map style={styles.map} mapStyle={mapStyle}>
         <Camera
           ref={cameraRef}
-          defaultSettings={{ centerCoordinate: FINLAND_DEFAULT.center, zoomLevel: FINLAND_DEFAULT.zoom }}
+          initialViewState={{
+            center: FINLAND_DEFAULT.center,
+            zoom: FINLAND_DEFAULT.zoom,
+          }}
         />
-        <UserLocation />
+        {location && (
+          <Marker
+            id="vessel"
+            lngLat={[location.coords.longitude, location.coords.latitude]}
+          >
+            <View
+              style={[
+                styles.vesselMarker,
+                {
+                  transform: [{
+                    rotate: `${location.coords.heading ?? 0}deg`,
+                  }],
+                },
+              ]}
+              accessible
+              accessibilityLabel="Oma alus"
+            >
+              <View style={styles.vesselTriangle} />
+            </View>
+          </Marker>
+        )}
+        {shallowAreas && (
+          <GeoJSONSource id="shallow-areas" data={shallowAreas}>
+            <Layer
+              id="shallow-fill"
+              type="fill"
+              paint={{
+                'fill-color': Colors.warning,
+                'fill-opacity': 0.25,
+              }}
+            />
+            <Layer
+              id="shallow-outline"
+              type="line"
+              paint={{
+                'line-color': Colors.warning,
+                'line-width': 1.5,
+              }}
+            />
+          </GeoJSONSource>
+        )}
         {fairwayLines && (
           <GeoJSONSource id="fairways" data={fairwayLines}>
             <Layer
@@ -213,17 +284,25 @@ export default function MapScreen() {
             />
           </GeoJSONSource>
         )}
-        {hazards.map((h) => (
-          <Marker
-            key={String(h.id)}
-            id={String(h.id)}
-            lngLat={[h.longitude, h.latitude]}
-          >
-            <View style={styles.hazardMarker}>
-              <Text style={styles.hazardMarkerText}>⚠</Text>
-            </View>
-          </Marker>
-        ))}
+        {hazards.map((h) => {
+          const threat = getHazardThreat(h.depth_cm, draftCm);
+          const ts = THREAT_STYLE[threat];
+          return (
+            <Marker
+              key={String(h.id)}
+              id={String(h.id)}
+              lngLat={[h.longitude, h.latitude]}
+            >
+              <View
+                style={[styles.hazardMarker, { backgroundColor: ts.bg }]}
+                accessible
+                accessibilityLabel={`Matalikko: ${ts.label}${h.depth_cm ? `, ${h.depth_cm} cm` : ''}`}
+              >
+                <Text style={styles.hazardMarkerText}>{ts.icon}</Text>
+              </View>
+            </Marker>
+          );
+        })}
       </Map>
 
       <View style={styles.topBar}>
@@ -233,12 +312,46 @@ export default function MapScreen() {
         </Text>
       </View>
 
+      {location && (
+        <TouchableOpacity
+          style={styles.recenterButton}
+          onPress={() => {
+            cameraRef.current?.flyTo({
+              center: [location.coords.longitude, location.coords.latitude],
+              zoom: 13,
+              duration: 600,
+            });
+          }}
+          accessibilityLabel="Keskitä kartta omalle sijainnille"
+        >
+          <Text style={styles.recenterIcon}>◎</Text>
+          <Text style={styles.recenterText}>Oma sijaintini</Text>
+        </TouchableOpacity>
+      )}
+
+      <TouchableOpacity
+        style={styles.rescueButton}
+        onPress={() => {
+          Alert.alert(
+            'Soita meripelastus?',
+            'Väärä hätäpuhelu on rangaistava teko. Soita vain todellisessa hädässä.',
+            [
+              { text: 'Soita 112', style: 'destructive', onPress: () => Linking.openURL('tel:112') },
+              { text: 'Peruuta', style: 'cancel' },
+            ]
+          );
+        }}
+        accessibilityLabel="Soita meripelastus"
+      >
+        <Text style={styles.rescueText}>Soita meripelastus</Text>
+      </TouchableOpacity>
+
       <View style={styles.bottomBar}>
         {waterStation && <WaterLevelBar station={waterStation} />}
         {location && (
           <Text style={styles.coordText}>
-            {location.coords.latitude.toFixed(5)}°N{' '}
-            {location.coords.longitude.toFixed(5)}°E
+            {location.coords.latitude.toFixed(4)}°N{' '}
+            {location.coords.longitude.toFixed(4)}°E
           </Text>
         )}
         <TouchableOpacity style={styles.reportButton} onPress={handleReportHazard}>
@@ -345,6 +458,67 @@ const styles = StyleSheet.create({
     color: Colors.white,
     fontWeight: '700',
     fontSize: 16,
+  },
+  recenterButton: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 112 : 96,
+    right: 16,
+    backgroundColor: 'rgba(10,61,107,0.9)',
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    gap: 2,
+  },
+  recenterIcon: {
+    color: Colors.white,
+    fontSize: 18,
+  },
+  recenterText: {
+    color: Colors.white,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  rescueButton: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 176 : 160,
+    right: 16,
+    backgroundColor: Colors.primary,
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    gap: 2,
+  },
+  rescueText: {
+    color: Colors.white,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  vesselMarker: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  vesselTriangle: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 9,
+    borderRightWidth: 9,
+    borderBottomWidth: 28,
+    borderStyle: 'solid',
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderBottomColor: Colors.primary,
+    // valkoinen reunus varjostuksella
+    shadowColor: Colors.white,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 3,
+    elevation: 4,
   },
   hazardMarker: {
     backgroundColor: Colors.danger,
