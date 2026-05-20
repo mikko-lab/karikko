@@ -2,57 +2,44 @@
 
 Matalikkovaroitin Suomen sisävesille ja rannikolle.
 
-Saimaan vedenkorkeus on alimmillaan 50 vuoteen. Uusia kiviä paljastuu. Veneilijät eivät tiedä missä ne ovat. Karikko on sovellus jossa käyttäjät merkitsevät matalikkoja jaettavalle kartalle — ja näkevät reaaliaikaisesti vedenkorkeuden ja viralliset väylät.
+Saimaan vedenkorkeus on alimmillaan 50 vuoteen. Uusia kiviä paljastuu. Veneilijät eivät tiedä missä ne ovat. Karikko on sovellus jossa käyttäjät merkitsevät matalikkoja jaettavalle kartalle — ja näkevät reaaliaikaisesti vedenkorkeuden, viralliset väylät ja lähialueen alukset.
 
 ## Ominaisuudet
 
-- **Jaettu matalikkokartta** — merkitse matalikko GPS-pisteeseen, kaikki näkevät sen
+- **Jaettu matalikkokartta** — merkitse matalikko GPS-pisteeseen, kaikki näkevät sen heti
+- **Värikoodattu uhka-arvio** — punainen/oranssi/harmaa oman syväyksen mukaan
 - **Reaaliaikainen vedenkorkeus** — SYKE:n hydrologiarajapinta, lähin mittausasema
-- **Viralliset väylät** — Väyläviraston navigointilinjat kartalla katkoviivana
-- **Suomenkielinen kartta** — OpenFreeMap, nimet suomeksi
-- **A11y ensin** — ei punavihreää väriyhdistelmää, kaikki varoitukset tekstinä värin lisäksi
+- **Viralliset väylät** — Väyläviraston navigointilinjat ja matalat alueet kartalla
+- **AIS-alukset** — lähialueen alukset kartalla, napautus näyttää nimen ja tiedot
+- **Tuulitiedote** — FMI:n ennuste, suunta ja nopeus alapalkissa
+- **Salama-varoitus** — badge yläpalkissa jos maasalamaiskuja 50 km säteellä
+- **Merenkulkutiedotteet** — Traficomin aktiiviset NtM-varoitukset
+- **Meripelastus** — vahvistusdialogi → soittaa 112
+- **A11y ensin** — ei punavihreää väriyhdistelmää, kaikki markerit accessibilityLabelilla
 
 ## Stack
 
 **Sovellus**
-- React Native + Expo SDK 54
-- TypeScript
+- React Native + Expo SDK 54, TypeScript
 - MapLibre React Native
-- expo-sqlite (offline-varmuuskopio)
+- expo-sqlite (offline-varmuuskopio matalikkomerkinnöille)
 - expo-location
 
-**Backend** ([karikko-api](https://github.com/mikko-lab/karikko-api))
-- Next.js 15 App Router
-- TypeScript
-- Neon PostgreSQL (serverless)
-- Vercel
-
-**Integraatiot**
-- [SYKE Hydrologiarajapinta](https://rajapinnat.ymparisto.fi/api/Hydrologiarajapinta/1.2/odata/) — vedenkorkeus
-- [Väylävirasto OGC Features API](https://avoinapi.vaylapilvi.fi/vaylatiedot/ogc/features/v1/) — väylät ja turvalaitteet
-- Tulossa: Fintraffic/Digitraffic (väylähäiriöt, AIS), FMI (sää)
+**Backend** → [karikko-api](https://github.com/mikko-lab/karikko-api)
 
 ## Kehitysympäristö
 
 ```bash
-# Asenna riippuvuudet
 npm install
-
-# Käynnistä kehityspalvelin
 npx expo start
 
-# Android-emulaattori (vaatii Android Studion ja Pixel 9 AVD:n)
+# Android-emulaattori (Pixel 9 AVD)
 npx expo run:android
-```
-
-**Ympäristömuuttujat** — luo `.env.local`:
-```
-# Ei tarvita toistaiseksi — backend URL on kovakoodattu kehityksessä
 ```
 
 ## Tietoturva
 
-Kaikki avoimet rajapinnat (SYKE, Väylävirasto) kutsutaan backendin kautta — ei suoraan sovelluksesta. Käyttäjästä ei tallenneta henkilötietoja.
+Käyttäjästä ei tallenneta henkilötietoja. Matalikkomerkinnöissä rate limit 10/tunti/IP.
 
 ## Lisenssi
 
