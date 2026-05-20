@@ -7,6 +7,8 @@ Saimaan vedenkorkeus on alimmillaan 50 vuoteen. Uusia kiviä paljastuu. Veneilij
 ## Ominaisuudet
 
 - **Jaettu matalikkokartta** — merkitse matalikko GPS-pisteeseen, kaikki näkevät sen heti
+- **Valokuva merkinnästä** — liitä kuva matalikosta kameralla tai galleriasta, kuva pakkautuu automaattisesti
+- **Vahvistukset** — muut veneilijät voivat vahvistaa merkinnän oikeaksi
 - **Värikoodattu uhka-arvio** — punainen/oranssi/harmaa oman syväyksen mukaan
 - **Reaaliaikainen vedenkorkeus** — SYKE:n hydrologiarajapinta, lähin mittausasema
 - **Viralliset väylät** — Väyläviraston navigointilinjat ja matalat alueet kartalla
@@ -15,7 +17,7 @@ Saimaan vedenkorkeus on alimmillaan 50 vuoteen. Uusia kiviä paljastuu. Veneilij
 - **Salama-varoitus** — badge yläpalkissa jos maasalamaiskuja 50 km säteellä
 - **Merenkulkutiedotteet** — Traficomin aktiiviset NtM-varoitukset
 - **Meripelastus** — vahvistusdialogi → soittaa 112
-- **A11y ensin** — ei punavihreää väriyhdistelmää, kaikki markerit accessibilityLabelilla
+- **A11y ensin** — ei punavihreää väriyhdistelmää, kaikki markerit accessibilityLabelilla, haptinen palaute painikkeissa
 
 ## Stack
 
@@ -24,6 +26,7 @@ Saimaan vedenkorkeus on alimmillaan 50 vuoteen. Uusia kiviä paljastuu. Veneilij
 - MapLibre React Native
 - expo-sqlite (offline-varmuuskopio matalikkomerkinnöille)
 - expo-location
+- expo-image-picker + expo-image-manipulator (kuvaupload, automaattinen pakkaus 1000px/JPEG)
 
 **Backend** → [karikko-api](https://github.com/mikko-lab/karikko-api)
 

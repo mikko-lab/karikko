@@ -9,7 +9,12 @@ import {
   TextInput,
   Platform,
   Linking,
+  Vibration,
+  Image,
+  ActivityIndicator,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import {
   Map,
   Camera,
@@ -21,7 +26,7 @@ import {
 import * as Location from 'expo-location';
 import { Colors } from '../constants/colors';
 import { getVesselDraft } from '../storage/settings';
-import { insertHazard, getNearbyHazards, Hazard } from '../storage/db';
+import { insertHazard, getNearbyHazards } from '../storage/db';
 import WaterLevelBar, { WaterStation } from '../components/WaterLevelBar';
 
 const API_BASE = 'https://karikko-api.vercel.app/api/v1';
@@ -40,6 +45,18 @@ interface Vessel {
   nav_status: number;
 }
 
+interface ApiHazard {
+  id: number;
+  latitude: number;
+  longitude: number;
+  depth_cm: number | null;
+  note: string | null;
+  photo_url: string | null;
+  confirmed_count: number;
+  status: string;
+  reported_at: string | null;
+}
+
 function getHazardThreat(depthCm: number | null | undefined, draftCm: number): HazardThreat {
   if (depthCm == null) return 'caution'; // tuntematon syvyys → tarkkaile
   if (depthCm <= draftCm) return 'danger';
@@ -55,7 +72,7 @@ const THREAT_STYLE: Record<HazardThreat, { bg: string; icon: string; label: stri
 
 const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 
-const WIND_DIRS = ['P', 'KO', 'I', 'KA', 'E', 'LO', 'L', 'LU'];
+const WIND_DIRS = ['Pohjoinen', 'Koillinen', 'Itä', 'Kaakko', 'Etelä', 'Lounas', 'Länsi', 'Luode'];
 function degToCardinal(deg: number): string {
   return WIND_DIRS[Math.round(deg / 45) % 8];
 }
@@ -101,10 +118,14 @@ export default function MapScreen() {
   }, []);
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [draftCm, setDraftCm] = useState<number>(80);
-  const [hazards, setHazards] = useState<Hazard[]>([]);
+  const [hazards, setHazards] = useState<ApiHazard[]>([]);
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [reportNote, setReportNote] = useState('');
   const [reportDepth, setReportDepth] = useState('');
+  const [reportPhotoUri, setReportPhotoUri] = useState<string | null>(null);
+  const [selectedHazard, setSelectedHazard] = useState<ApiHazard | null>(null);
+  const [hazardPhotoLoading, setHazardPhotoLoading] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [waterStation, setWaterStation] = useState<WaterStation | null>(null);
   const [fairwayLines, setFairwayLines] = useState<any>(null);
   const [shallowAreas, setShallowAreas] = useState<any>(null);
@@ -188,7 +209,17 @@ export default function MapScreen() {
       setHazardsLoading(false);
     }
     const local = await getNearbyHazards(lat, lon);
-    setHazards(local);
+    setHazards(local.map((h) => ({
+      id: h.id ?? 0,
+      latitude: h.latitude,
+      longitude: h.longitude,
+      depth_cm: h.depth_cm ?? null,
+      note: h.note ?? null,
+      photo_url: null,
+      confirmed_count: 0,
+      status: 'unverified',
+      reported_at: null,
+    })));
   }
 
   async function fetchFairways(lat: number, lon: number) {
@@ -273,39 +304,132 @@ export default function MapScreen() {
     }
   }
 
+  async function pickPhoto() {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Kameralupa puuttuu', 'Salli kameran käyttö asetuksista lisätäksesi kuvan.');
+      return;
+    }
+    Alert.alert(
+      'Lisää kuva',
+      'Valitse lähde',
+      [
+        {
+          text: 'Ota kuva',
+          onPress: async () => {
+            const result = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['images'],
+              quality: 0.8,
+              allowsEditing: false,
+            });
+            if (!result.canceled && result.assets[0]) {
+              await processAndSetPhoto(result.assets[0].uri);
+            }
+          },
+        },
+        {
+          text: 'Valitse galleriasta',
+          onPress: async () => {
+            const result = await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: ['images'],
+              quality: 0.8,
+              allowsEditing: false,
+            });
+            if (!result.canceled && result.assets[0]) {
+              await processAndSetPhoto(result.assets[0].uri);
+            }
+          },
+        },
+        { text: 'Peruuta', style: 'cancel' },
+      ],
+    );
+  }
+
+  async function processAndSetPhoto(uri: string) {
+    const ctx = ImageManipulator.ImageManipulator.manipulate(uri);
+    ctx.resize({ width: 1000 });
+    const resized = await ctx.renderAsync();
+    const saved = await resized.saveAsync({ compress: 0.75, format: ImageManipulator.SaveFormat.JPEG });
+    setReportPhotoUri(saved.uri);
+  }
+
   async function handleReportHazard() {
     if (!location) {
       Alert.alert('Sijainti ei saatavilla', 'Odota että GPS löytyy.');
       return;
     }
+    Vibration.vibrate(50);
     setReportModalVisible(true);
   }
 
   async function submitReport() {
     if (!location) return;
     const depth = reportDepth ? parseInt(reportDepth, 10) : undefined;
-    const body = {
-      latitude: location.coords.latitude,
-      longitude: location.coords.longitude,
-      depth_cm: depth ?? null,
-      note: reportNote || null,
-    };
+
     setReportModalVisible(false);
-    setReportNote('');
-    setReportDepth('');
 
     // Tallennetaan paikallisesti heti (offline-tuki)
-    await insertHazard({ latitude: body.latitude, longitude: body.longitude, depth_cm: depth, note: body.note ?? undefined });
+    await insertHazard({ latitude: location.coords.latitude, longitude: location.coords.longitude, depth_cm: depth, note: reportNote || undefined });
 
-    // Lähetetään backendiin taustalla
+    // Ladataan kuva jos on, muuten lähetetään ilman
+    let photoUrl: string | null = null;
+    if (reportPhotoUri) {
+      try {
+        const form = new FormData();
+        form.append('photo', { uri: reportPhotoUri, name: 'photo.jpg', type: 'image/jpeg' } as unknown as Blob);
+        const uploadRes = await fetch(`${API_BASE}/hazards/photo`, {
+          method: 'POST',
+          headers: { 'X-App-Platform': 'karikko-mobile' },
+          body: form,
+        });
+        if (uploadRes.ok) {
+          const { url } = await uploadRes.json() as { url: string };
+          photoUrl = url;
+        }
+      } catch {
+        // kuvan lataus epäonnistui — jatketaan ilman kuvaa
+      }
+    }
+
+    setReportNote('');
+    setReportDepth('');
+    setReportPhotoUri(null);
+
     fetch(`${API_BASE}/hazards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-App-Platform': 'karikko-mobile' },
-      body: JSON.stringify(body),
-    }).catch(() => {/* offline — paikallinen kopio riittää */});
+      body: JSON.stringify({
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+        depth_cm: depth ?? null,
+        note: reportNote || null,
+        photo_url: photoUrl,
+      }),
+    }).catch(() => {});
 
     Alert.alert('Kiitos!', 'Matalikkomerkintä tallennettu.');
     fetchHazards(location.coords.latitude, location.coords.longitude);
+  }
+
+  async function confirmHazard(hazard: ApiHazard) {
+    if (confirming) return;
+    setConfirming(true);
+    try {
+      const res = await fetch(`${API_BASE}/hazards/${hazard.id}/confirm`, {
+        method: 'POST',
+        headers: { 'X-App-Platform': 'karikko-mobile' },
+      });
+      if (res.ok) {
+        setSelectedHazard({ ...hazard, confirmed_count: hazard.confirmed_count + 1 });
+        setHazards((prev) =>
+          prev.map((h) => h.id === hazard.id ? { ...h, confirmed_count: h.confirmed_count + 1 } : h)
+        );
+      }
+    } catch {
+      // offline — ei tehdä mitään
+    } finally {
+      setConfirming(false);
+    }
   }
 
   if (!mapStyle) return (
@@ -416,13 +540,15 @@ export default function MapScreen() {
               id={String(h.id)}
               lngLat={[h.longitude, h.latitude]}
             >
-              <View
-                style={[styles.hazardMarker, { backgroundColor: ts.bg }]}
+              <TouchableOpacity
                 accessible
+                accessibilityRole="button"
                 accessibilityLabel={`Matalikko: ${ts.label}${h.depth_cm ? `, ${h.depth_cm} cm` : ''}`}
+                onPress={() => setSelectedHazard(h)}
+                style={[styles.hazardMarker, { backgroundColor: ts.bg }]}
               >
                 <Text style={styles.hazardMarkerText}>{ts.icon}</Text>
-              </View>
+              </TouchableOpacity>
             </Marker>
           );
         })}
@@ -475,6 +601,7 @@ export default function MapScreen() {
       <TouchableOpacity
         style={styles.rescueButton}
         onPress={() => {
+          Vibration.vibrate(50);
           Alert.alert(
             'Soita meripelastus?',
             'Väärä hätäpuhelu on rangaistava teko. Soita vain todellisessa hädässä.',
@@ -488,6 +615,63 @@ export default function MapScreen() {
       >
         <Text style={styles.rescueText}>Soita meripelastus</Text>
       </TouchableOpacity>
+
+      {selectedHazard && (
+        <View style={styles.vesselCard}>
+          <View style={styles.vesselCardHeader}>
+            <Text style={styles.vesselCardName}>
+              {selectedHazard.note ?? 'Matalikko'}
+            </Text>
+            <TouchableOpacity onPress={() => setSelectedHazard(null)} accessibilityLabel="Sulje matalikkokortti" hitSlop={12}>
+              <Text style={styles.vesselCardClose}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.vesselCardType}>
+            {THREAT_STYLE[getHazardThreat(selectedHazard.depth_cm, draftCm)].label}
+            {selectedHazard.depth_cm != null ? ` · ${selectedHazard.depth_cm} cm` : ''}
+          </Text>
+          {selectedHazard.photo_url && (
+            <View style={styles.hazardPhotoWrapper}>
+              {hazardPhotoLoading && (
+                <ActivityIndicator
+                  style={StyleSheet.absoluteFill}
+                  color={Colors.white}
+                />
+              )}
+              <Image
+                source={{ uri: selectedHazard.photo_url }}
+                style={styles.hazardPhoto}
+                resizeMode="cover"
+                onLoadStart={() => setHazardPhotoLoading(true)}
+                onLoadEnd={() => setHazardPhotoLoading(false)}
+                accessible
+                accessibilityLabel={
+                  `Käyttäjän ottama kuva matalikosta` +
+                  (selectedHazard.depth_cm != null ? `, syvyys noin ${selectedHazard.depth_cm} senttimetriä` : '')
+                }
+              />
+            </View>
+          )}
+          <View style={styles.hazardConfirmRow}>
+            <Text style={styles.vesselCardStat}>
+              {selectedHazard.confirmed_count > 0
+                ? `${selectedHazard.confirmed_count} vahvist${selectedHazard.confirmed_count === 1 ? 'us' : 'usta'}`
+                : 'Ei vielä vahvistettu'}
+            </Text>
+            <TouchableOpacity
+              style={styles.confirmButton}
+              onPress={() => confirmHazard(selectedHazard)}
+              disabled={confirming}
+              accessibilityLabel="Vahvista matalikko — olen nähnyt tämän"
+              accessibilityRole="button"
+            >
+              <Text style={styles.confirmButtonText}>
+                {confirming ? '…' : '👍 Vahvistan'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {selectedVessel && (
         <TouchableOpacity
@@ -525,7 +709,7 @@ export default function MapScreen() {
           <Text
             style={styles.windText}
             accessible
-            accessibilityLabel={`Tuuli: ${degToCardinal(wind.dirDeg)}, ${wind.speedMs} metriä sekunnissa, puuska ${wind.gustMs}`}
+            accessibilityLabel={`Tuuli: ${degToCardinal(wind.dirDeg)}, ${wind.speedMs} metriä sekunnissa${wind.gustMs > wind.speedMs ? `, puuska ${wind.gustMs}` : ''}`}
           >
             {'💨 '}
             {degToCardinal(wind.dirDeg)}
@@ -569,10 +753,19 @@ export default function MapScreen() {
               value={reportNote}
               onChangeText={setReportNote}
             />
+            {reportPhotoUri ? (
+              <TouchableOpacity onPress={pickPhoto} style={{ width: '100%', marginBottom: 4 }}>
+                <Image source={{ uri: reportPhotoUri }} style={styles.photoPreview} resizeMode="cover" />
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={styles.photoButton} onPress={pickPhoto}>
+                <Text style={styles.photoButtonText}>📷  Lisää kuva (valinnainen)</Text>
+              </TouchableOpacity>
+            )}
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={[styles.modalBtn, styles.modalBtnCancel]}
-                onPress={() => setReportModalVisible(false)}
+                onPress={() => { setReportModalVisible(false); setReportPhotoUri(null); }}
               >
                 <Text style={styles.modalBtnCancelText}>Peruuta</Text>
               </TouchableOpacity>
@@ -651,11 +844,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#003354',
     borderRadius: 14,
     padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 10,
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 14,
   },
   vesselCardHeader: {
     flexDirection: 'row',
@@ -691,7 +886,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   vesselCardMmsi: {
-    color: 'rgba(255,255,255,0.4)',
+    color: '#a0b2c6',
     fontSize: 11,
     marginLeft: 'auto',
   },
@@ -702,6 +897,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
     fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
     letterSpacing: 0.5,
   },
@@ -814,6 +1011,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
     fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
     letterSpacing: 0.3,
     width: '100%',
@@ -949,5 +1148,56 @@ const styles = StyleSheet.create({
   modalBtnSubmitText: {
     color: Colors.white,
     fontWeight: '700',
+  },
+  photoButton: {
+    width: '100%',
+    height: 80,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+  },
+  photoPreview: {
+    width: '100%',
+    height: 80,
+    borderRadius: 10,
+  },
+  photoButtonText: {
+    color: Colors.textMuted,
+    fontSize: 14,
+  },
+  hazardPhotoWrapper: {
+    width: '100%',
+    height: 160,
+    borderRadius: 10,
+    marginTop: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    overflow: 'hidden',
+  },
+  hazardPhoto: {
+    width: '100%',
+    height: '100%',
+  },
+  hazardConfirmRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  confirmButton: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  confirmButtonText: {
+    color: Colors.white,
+    fontSize: 13,
+    fontWeight: '600',
   },
 });
