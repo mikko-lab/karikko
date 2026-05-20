@@ -28,6 +28,18 @@ const API_BASE = 'https://karikko-api.vercel.app/api/v1';
 
 type HazardThreat = 'danger' | 'caution' | 'safe';
 
+interface Vessel {
+  mmsi: number;
+  name: string | null;
+  ship_type: string;
+  lat: number;
+  lon: number;
+  sog_kn: number;
+  cog_deg: number;
+  heading_deg: number | null;
+  nav_status: number;
+}
+
 function getHazardThreat(depthCm: number | null | undefined, draftCm: number): HazardThreat {
   if (depthCm == null) return 'caution'; // tuntematon syvyys → tarkkaile
   if (depthCm <= draftCm) return 'danger';
@@ -42,6 +54,17 @@ const THREAT_STYLE: Record<HazardThreat, { bg: string; icon: string; label: stri
 };
 
 const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
+
+const WIND_DIRS = ['P', 'KO', 'I', 'KA', 'E', 'LO', 'L', 'LU'];
+function degToCardinal(deg: number): string {
+  return WIND_DIRS[Math.round(deg / 45) % 8];
+}
+
+const NAV_STATUS: Record<number, string> = {
+  0: 'Matkalla', 1: 'Ankkurissa', 2: 'Ei hallinnassa',
+  3: 'Rajoitettu ohjauskyky', 4: 'Syväysrajoitus', 5: 'Laiturissa',
+  6: 'Maalle ajanut', 7: 'Kalastamassa', 8: 'Purjehtimassa',
+};
 
 function toFinnishStyle(style: any): any {
   if (!style?.layers) return style;
@@ -69,6 +92,13 @@ export default function MapScreen() {
       .then((style) => setMapStyle(toFinnishStyle(style)))
       .catch(() => setMapStyle(MAP_STYLE_URL));
   }, []);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/notices`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (d?.data?.notices) setNoticeCount(d.data.notices.length); })
+      .catch(() => {});
+  }, []);
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [draftCm, setDraftCm] = useState<number>(80);
   const [hazards, setHazards] = useState<Hazard[]>([]);
@@ -78,13 +108,21 @@ export default function MapScreen() {
   const [waterStation, setWaterStation] = useState<WaterStation | null>(null);
   const [fairwayLines, setFairwayLines] = useState<any>(null);
   const [shallowAreas, setShallowAreas] = useState<any>(null);
+  const [vessels, setVessels] = useState<Vessel[]>([]);
+  const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
+  const [noticeCount, setNoticeCount] = useState<number>(0);
+  const [lightningCount, setLightningCount] = useState<number>(0);
+  const [wind, setWind] = useState<{ speedMs: number; dirDeg: number; gustMs: number } | null>(null);
   const [hazardsLoading, setHazardsLoading] = useState(false);
   const cameraRef = useRef<CameraRef>(null);
   const hasFollowed = useRef(false);
+  const locationRef = useRef<Location.LocationObject | null>(null);
+  const forecastFetched = useRef(false);
   const FINLAND_DEFAULT = { center: [25.0, 60.2] as [number, number], zoom: 7 };
 
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
+    let vesselInterval: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -99,6 +137,7 @@ export default function MapScreen() {
         { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 5 },
         async (loc) => {
           setLocation(loc);
+          locationRef.current = loc;
           if (!hasFollowed.current) {
             hasFollowed.current = true;
             cameraRef.current?.flyTo({
@@ -110,11 +149,28 @@ export default function MapScreen() {
           fetchHazards(loc.coords.latitude, loc.coords.longitude);
           fetchWaterLevel(loc.coords.latitude, loc.coords.longitude);
           fetchFairways(loc.coords.latitude, loc.coords.longitude);
+          fetchVessels(loc.coords.latitude, loc.coords.longitude);
+          fetchLightning(loc.coords.latitude, loc.coords.longitude);
+          if (!forecastFetched.current) {
+            forecastFetched.current = true;
+            fetchMarineForecast(loc.coords.latitude, loc.coords.longitude);
+          }
         }
       );
+
+      vesselInterval = setInterval(() => {
+        const loc = locationRef.current;
+        if (loc) {
+          fetchVessels(loc.coords.latitude, loc.coords.longitude);
+          fetchLightning(loc.coords.latitude, loc.coords.longitude);
+        }
+      }, 30_000);
     })();
 
-    return () => { sub?.remove(); };
+    return () => {
+      sub?.remove();
+      if (vesselInterval) clearInterval(vesselInterval);
+    };
   }, []);
 
   async function fetchHazards(lat: number, lon: number) {
@@ -139,8 +195,9 @@ export default function MapScreen() {
     try {
       const res = await fetch(`${API_BASE}/fairways?lat=${lat}&lon=${lon}&radius_m=5000`);
       if (!res.ok) return;
-      const data = await res.json();
-      const lines = data.lines ?? [];
+      const json = await res.json();
+      const payload = json.data ?? json;
+      const lines = payload.lines ?? [];
       if (lines.length > 0) {
         setFairwayLines({
           type: 'FeatureCollection',
@@ -152,7 +209,7 @@ export default function MapScreen() {
         });
       }
 
-      const shallowFeatures = (data.fairways ?? [])
+      const shallowFeatures = (payload.fairways ?? [])
         .filter((f: any) => f.designDepthM !== null && f.designDepthM <= 1.5)
         .map((f: any) => ({
           type: 'Feature',
@@ -176,6 +233,43 @@ export default function MapScreen() {
       if (first && first.distKm <= 25) setWaterStation(first);
     } catch {
       // offline tai verkkovirhe — näytetään vanha arvo jos on
+    }
+  }
+
+  async function fetchVessels(lat: number, lon: number) {
+    try {
+      const res = await fetch(`${API_BASE}/vessels?lat=${lat}&lon=${lon}&radius_m=10000`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setVessels(data.data?.vessels ?? []);
+    } catch {
+      // offline — säilytetään vanha data
+    }
+  }
+
+  async function fetchLightning(lat: number, lon: number) {
+    try {
+      const res = await fetch(`${API_BASE}/lightning?lat=${lat}&lon=${lon}&radius_m=50000&minutes=30`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const groundStrikes = (data.data?.strikes ?? []).filter((s: { cloud_flash: boolean }) => !s.cloud_flash);
+      setLightningCount(groundStrikes.length);
+    } catch {
+      // offline
+    }
+  }
+
+  async function fetchMarineForecast(lat: number, lon: number) {
+    try {
+      const res = await fetch(`${API_BASE}/marine-forecast?lat=${lat}&lon=${lon}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const now = data.data?.hours?.[0];
+      if (now && now.wind_speed_ms !== null) {
+        setWind({ speedMs: now.wind_speed_ms, dirDeg: now.wind_direction_deg ?? 0, gustMs: now.wind_gust_ms ?? now.wind_speed_ms });
+      }
+    } catch {
+      // offline
     }
   }
 
@@ -206,7 +300,7 @@ export default function MapScreen() {
     // Lähetetään backendiin taustalla
     fetch(`${API_BASE}/hazards`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-App-Platform': 'karikko-mobile' },
       body: JSON.stringify(body),
     }).catch(() => {/* offline — paikallinen kopio riittää */});
 
@@ -284,6 +378,35 @@ export default function MapScreen() {
             />
           </GeoJSONSource>
         )}
+        {vessels.map((v) => {
+          const isMoving = v.sog_kn >= 0.5;
+          const rotation = v.heading_deg ?? v.cog_deg;
+          const label = v.name
+            ? `${v.name}, ${v.ship_type}, ${v.sog_kn.toFixed(1)} solmua`
+            : `${v.ship_type}, ${v.sog_kn.toFixed(1)} solmua`;
+          return (
+            <Marker
+              key={String(v.mmsi)}
+              id={`vessel-${v.mmsi}`}
+              lngLat={[v.lon, v.lat]}
+            >
+              <TouchableOpacity
+                accessible
+                accessibilityLabel={label}
+                accessibilityRole="button"
+                onPress={() => setSelectedVessel(v)}
+                style={[
+                  styles.vesselOtherMarker,
+                  isMoving && { transform: [{ rotate: `${rotation}deg` }] },
+                ]}
+              >
+                {isMoving
+                  ? <View style={styles.vesselOtherTriangle} />
+                  : <View style={styles.vesselOtherAnchor} />}
+              </TouchableOpacity>
+            </Marker>
+          );
+        })}
         {hazards.map((h) => {
           const threat = getHazardThreat(h.depth_cm, draftCm);
           const ts = THREAT_STYLE[threat];
@@ -306,7 +429,27 @@ export default function MapScreen() {
       </Map>
 
       <View style={styles.topBar}>
-        <Text style={styles.appName}>KARIKKO</Text>
+        <View style={styles.topBarLeft}>
+          <Text style={styles.appName}>KARIKKO</Text>
+          {noticeCount > 0 && (
+            <View
+              style={styles.noticeBadge}
+              accessible
+              accessibilityLabel={`${noticeCount} merenkulkutiedotetta`}
+            >
+              <Text style={styles.noticeBadgeText}>{noticeCount}</Text>
+            </View>
+          )}
+          {lightningCount > 0 && (
+            <View
+              style={styles.lightningBadge}
+              accessible
+              accessibilityLabel={`Salamavaroitus: ${lightningCount} maasalamaiskua 50 km säteellä`}
+            >
+              <Text style={styles.lightningBadgeText}>⚡ {lightningCount}</Text>
+            </View>
+          )}
+        </View>
         <Text style={styles.draftInfo}>
           {hazardsLoading ? 'Ladataan…' : `Syväys: ${draftCm} cm`}
         </Text>
@@ -346,7 +489,51 @@ export default function MapScreen() {
         <Text style={styles.rescueText}>Soita meripelastus</Text>
       </TouchableOpacity>
 
+      {selectedVessel && (
+        <TouchableOpacity
+          style={styles.vesselCard}
+          onPress={() => setSelectedVessel(null)}
+          accessibilityLabel="Sulje alustiedot"
+          activeOpacity={1}
+        >
+          <View style={styles.vesselCardHeader}>
+            <Text style={styles.vesselCardName}>
+              {selectedVessel.name ?? 'Tuntematon alus'}
+            </Text>
+            <Text style={styles.vesselCardClose}>✕</Text>
+          </View>
+          <Text style={styles.vesselCardType}>{selectedVessel.ship_type}</Text>
+          <View style={styles.vesselCardRow}>
+            <Text style={styles.vesselCardStat}>
+              {NAV_STATUS[selectedVessel.nav_status] ?? 'Tuntematon tila'}
+            </Text>
+            <Text style={styles.vesselCardStat}>
+              {selectedVessel.sog_kn.toFixed(1)} kn
+            </Text>
+            <Text style={styles.vesselCardStat}>
+              {degToCardinal(selectedVessel.heading_deg ?? selectedVessel.cog_deg)}
+            </Text>
+            <Text style={styles.vesselCardMmsi}>
+              MMSI {selectedVessel.mmsi}
+            </Text>
+          </View>
+        </TouchableOpacity>
+      )}
+
       <View style={styles.bottomBar}>
+        {wind && (
+          <Text
+            style={styles.windText}
+            accessible
+            accessibilityLabel={`Tuuli: ${degToCardinal(wind.dirDeg)}, ${wind.speedMs} metriä sekunnissa, puuska ${wind.gustMs}`}
+          >
+            {'💨 '}
+            {degToCardinal(wind.dirDeg)}
+            {' '}
+            {wind.speedMs} m/s
+            {wind.gustMs > wind.speedMs ? ` (puuska ${wind.gustMs})` : ''}
+          </Text>
+        )}
         {waterStation && <WaterLevelBar station={waterStation} />}
         {location && (
           <Text style={styles.coordText}>
@@ -414,10 +601,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: 'rgba(10,61,107,0.9)',
+    backgroundColor: '#003354',
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 10,
+    borderBottomWidth: 2,
+    borderBottomColor: '#00223A',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    elevation: 8,
   },
   appName: {
     color: Colors.white,
@@ -426,33 +620,103 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
   draftInfo: {
-    color: Colors.accent,
+    color: '#FFCC00',
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   bottomBar: {
     position: 'absolute',
-    bottom: Platform.OS === 'ios' ? 40 : 24,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#003354',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: Platform.OS === 'ios' ? 34 : 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 12,
+  },
+  vesselCard: {
+    position: 'absolute',
     left: 16,
     right: 16,
+    bottom: Platform.OS === 'ios' ? 210 : 190,
+    backgroundColor: '#003354',
+    borderRadius: 14,
+    padding: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  vesselCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 8,
+    marginBottom: 2,
+  },
+  vesselCardName: {
+    color: Colors.white,
+    fontWeight: '700',
+    fontSize: 15,
+    flex: 1,
+  },
+  vesselCardClose: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 16,
+    paddingLeft: 8,
+  },
+  vesselCardType: {
+    color: '#FFCC00',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  vesselCardRow: {
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  vesselCardStat: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 12,
+  },
+  vesselCardMmsi: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 11,
+    marginLeft: 'auto',
   },
   coordText: {
     color: Colors.white,
     fontSize: 11,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.5,
   },
   reportButton: {
     backgroundColor: Colors.danger,
-    borderRadius: 12,
-    paddingVertical: 14,
+    borderRadius: 14,
+    paddingVertical: 16,
     paddingHorizontal: 32,
     width: '100%',
     alignItems: 'center',
+    shadowColor: Colors.danger,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 6,
   },
   reportButtonText: {
     color: Colors.white,
@@ -463,12 +727,19 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: Platform.OS === 'ios' ? 112 : 96,
     right: 16,
-    backgroundColor: 'rgba(10,61,107,0.9)',
+    backgroundColor: '#003354',
     borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
     alignItems: 'center',
     gap: 2,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.4)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 6,
   },
   recenterIcon: {
     color: Colors.white,
@@ -484,18 +755,69 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: Platform.OS === 'ios' ? 176 : 160,
     right: 16,
-    backgroundColor: Colors.primary,
+    backgroundColor: Colors.danger,
     borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
     alignItems: 'center',
     gap: 2,
+    borderWidth: 2,
+    borderColor: Colors.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 6,
   },
   rescueText: {
     color: Colors.white,
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.3,
+  },
+  topBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  noticeBadge: {
+    backgroundColor: '#FFCC00',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+  },
+  noticeBadgeText: {
+    color: '#003354',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  lightningBadge: {
+    backgroundColor: '#FF8C00',
+    borderRadius: 10,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  lightningBadgeText: {
+    color: Colors.white,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  windText: {
+    color: Colors.white,
+    fontSize: 12,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.3,
+    width: '100%',
+    textAlign: 'center',
   },
   vesselMarker: {
     width: 36,
@@ -513,12 +835,46 @@ const styles = StyleSheet.create({
     borderLeftColor: 'transparent',
     borderRightColor: 'transparent',
     borderBottomColor: Colors.primary,
-    // valkoinen reunus varjostuksella
     shadowColor: Colors.white,
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 1,
     shadowRadius: 3,
     elevation: 4,
+  },
+  vesselOtherMarker: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  vesselOtherTriangle: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 6,
+    borderRightWidth: 6,
+    borderBottomWidth: 20,
+    borderStyle: 'solid',
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderBottomColor: '#0066CC',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.4,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  vesselOtherAnchor: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#0066CC',
+    borderWidth: 2,
+    borderColor: Colors.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.4,
+    shadowRadius: 2,
+    elevation: 3,
   },
   hazardMarker: {
     backgroundColor: Colors.danger,
