@@ -24,7 +24,7 @@ import { getVesselDraft } from '../storage/settings';
 import { insertHazard, getNearbyHazards, Hazard } from '../storage/db';
 import WaterLevelBar, { WaterStation } from '../components/WaterLevelBar';
 
-const API_BASE = 'https://karikko-api.vercel.app';
+const API_BASE = 'https://karikko-api.vercel.app/api/v1';
 
 type HazardThreat = 'danger' | 'caution' | 'safe';
 
@@ -120,7 +120,7 @@ export default function MapScreen() {
   async function fetchHazards(lat: number, lon: number) {
     setHazardsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/hazards?lat=${lat}&lon=${lon}`);
+      const res = await fetch(`${API_BASE}/hazards?lat=${lat}&lon=${lon}`);
       if (res.ok) {
         const data = await res.json();
         setHazards(data);
@@ -137,7 +137,7 @@ export default function MapScreen() {
 
   async function fetchFairways(lat: number, lon: number) {
     try {
-      const res = await fetch(`${API_BASE}/api/fairways?lat=${lat}&lon=${lon}&radius=0.05`);
+      const res = await fetch(`${API_BASE}/fairways?lat=${lat}&lon=${lon}&radius_m=5000`);
       if (!res.ok) return;
       const data = await res.json();
       const lines = data.lines ?? [];
@@ -169,7 +169,7 @@ export default function MapScreen() {
 
   async function fetchWaterLevel(lat: number, lon: number) {
     try {
-      const res = await fetch(`${API_BASE}/api/water-level?lat=${lat}&lon=${lon}`);
+      const res = await fetch(`${API_BASE}/water-level?lat=${lat}&lon=${lon}`);
       if (!res.ok) return;
       const data = await res.json();
       const first = data.stations?.[0];
@@ -204,7 +204,7 @@ export default function MapScreen() {
     await insertHazard({ latitude: body.latitude, longitude: body.longitude, depth_cm: depth, note: body.note ?? undefined });
 
     // Lähetetään backendiin taustalla
-    fetch(`${API_BASE}/api/hazards`, {
+    fetch(`${API_BASE}/hazards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
