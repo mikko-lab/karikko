@@ -2,6 +2,8 @@
 
 Matalikkovaroitin Suomen sisävesille ja rannikolle.
 
+![Karikko-sovellus](assets/screenshot.png)
+
 Saimaan vedenkorkeus on alimmillaan 50 vuoteen. Uusia kiviä paljastuu. Veneilijät eivät tiedä missä ne ovat. Karikko on sovellus jossa käyttäjät merkitsevät matalikkoja jaettavalle kartalle — ja näkevät reaaliaikaisesti vedenkorkeuden, viralliset väylät ja lähialueen alukset.
 
 ## Ominaisuudet
